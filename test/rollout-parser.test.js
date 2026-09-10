@@ -12398,9 +12398,23 @@ function encodeAntigravityTestVi(f, val) {
   return Buffer.concat([encodeAntigravityTestTag(f, 0), encodeAntigravityTestVarint(val)]);
 }
 
-function buildAntigravityTestProto({ model, contextTokens, lastStepIndex }) {
+function buildAntigravityTestProto({ model, contextTokens, lastStepIndex, usage }) {
   const parts = [];
   if (model) parts.push(encodeAntigravityTestLd(19, model));
+  if (usage) {
+    // Field 4 carries the provider's own per-turn counters.
+    const f4 = [];
+    const put = (num, value) => {
+      if (Number.isFinite(value)) f4.push(encodeAntigravityTestVi(num, value));
+    };
+    put(1, usage.prefix);
+    put(2, usage.uncached);
+    put(3, usage.output);
+    put(5, usage.cached);
+    put(9, usage.text);
+    put(10, usage.reasoning);
+    if (f4.length) parts.push(encodeAntigravityTestLd(4, Buffer.concat(f4)));
+  }
   if (Number.isFinite(contextTokens)) {
     const f1 = encodeAntigravityTestVi(1, contextTokens);
     const f10 = encodeAntigravityTestLd(10, f1);
@@ -12496,6 +12510,94 @@ test("extractAntigravityGenInfo extracts model, context tokens, and step index f
     contextTokens: 25000,
     lastStepIndex: 0,
   });
+});
+
+test("extractAntigravityGenInfo decodes per-turn usage from field 4", () => {
+  // Real shape observed in a live conversation DB: the fixed system prefix
+  // (f4.1) sits alongside uncached input (f4.2), and f4.3 == f4.9 + f4.10.
+  const proto = buildAntigravityTestProto({
+    model: "gemini-3.8-flash",
+    contextTokens: 33824,
+    lastStepIndex: 0,
+    usage: { prefix: 1016, uncached: 4999, cached: 20325, output: 1954, text: 1059, reasoning: 895 },
+  });
+
+  const info = extractAntigravityGenInfo(proto);
+
+  assert.equal(info.hasUsageMetadata, true);
+  assert.equal(info.uncachedInput, 1016 + 4999, "fixed prefix folds into uncached input");
+  assert.equal(info.cachedInput, 20325);
+  assert.equal(info.textOutput, 1059);
+  assert.equal(info.reasoningOutput, 895);
+  assert.equal(info.outputTokens, 1954);
+});
+
+test("parseAntigravityIncremental bills field 4 usage instead of estimating from text", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-antigravity-usage-"));
+  try {
+    const turnOne = { prefix: 1016, uncached: 22161, cached: 0, output: 591, text: 544, reasoning: 47 };
+    const turnTwo = { prefix: 1016, uncached: 4999, cached: 20325, output: 1954, text: 1059, reasoning: 895 };
+    const { transcriptPath, queuePath } = await setupAntigravitySqliteSession(tmp, {
+      protos: [
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 1448,
+          lastStepIndex: 0,
+          usage: turnOne,
+        }),
+        buildAntigravityTestProto({
+          model: "gemini-3.8-flash",
+          contextTokens: 33824,
+          lastStepIndex: 2,
+          usage: turnTwo,
+        }),
+      ],
+      lines: antigravityPlannerLines([
+        {
+          userStep: 0,
+          userAt: "2026-04-05T14:00:00.000Z",
+          userContent: "hello",
+          plannerStep: 1,
+          plannerAt: "2026-04-05T14:01:00.000Z",
+          plannerContent: "hi",
+          thinking: "think1",
+        },
+        {
+          userStep: 2,
+          userAt: "2026-04-05T14:02:00.000Z",
+          userContent: "next prompt",
+          plannerStep: 3,
+          plannerAt: "2026-04-05T14:03:00.000Z",
+          plannerContent: "done",
+          thinking: "think2",
+        },
+      ]),
+    });
+    const cursors = { version: 1, files: {}, updatedAt: null };
+
+    await parseAntigravityIncremental({ sessionFiles: [transcriptPath], cursors, queuePath });
+
+    const queued = await readJsonLines(queuePath);
+    assert.equal(queued.length, 1);
+    const row = queued[0];
+
+    // Input is the whole prompt per turn, not the growth in context size, so
+    // both turns bill in full -- that is what the provider charges for.
+    assert.equal(row.input_tokens, 1016 + 22161 + 1016 + 4999);
+    assert.equal(row.cached_input_tokens, 20325, "cache reads are billed separately");
+    assert.equal(row.output_tokens, 544 + 1059, "text output, excluding reasoning");
+    assert.equal(row.reasoning_output_tokens, 47 + 895);
+    assert.equal(
+      row.total_tokens,
+      row.input_tokens +
+        row.cached_input_tokens +
+        row.output_tokens +
+        row.reasoning_output_tokens,
+      "total stays the sum of its columns",
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
 });
 
 test("parseAntigravityIncremental uses SQLite context size without inferring cache hits", async () => {
