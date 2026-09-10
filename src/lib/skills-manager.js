@@ -904,7 +904,7 @@ function listInstalledSkills() {
   });
 }
 
-async function installSkill(skillInput, targetIds = ["claude", "codex"]) {
+async function installSkill(skillInput, targetIds = ["claude", "codex"], prefetchedTree = null) {
   const skill = {
     key: String(skillInput?.key || ""),
     name: String(skillInput?.name || ""),
@@ -934,7 +934,9 @@ async function installSkill(skillInput, targetIds = ["claude", "codex"]) {
     );
   }
 
-  const { branch, tree } = await getRepoTree({
+  // Bulk update hands in the repo tree it already fetched, so N skills from one
+  // repo cost one GitHub call instead of N.
+  const { branch, tree } = prefetchedTree || await getRepoTree({
     owner: skill.repoOwner,
     name: skill.repoName,
     branch: skill.repoBranch,
@@ -1298,6 +1300,102 @@ async function checkUpdates({ force = false } = {}) {
   return { updates, checkedAt, cached: false };
 }
 
+// Re-install managed skills from upstream, grouping by repo exactly like
+// checkUpdates() so N skills from one repo cost one tree call, not N. Skills
+// whose upstream signature already matches are skipped, so a stale "update"
+// badge can never trigger a pointless re-download. Installs run sequentially:
+// installSkill() does its own read/modify/write of the registry, so concurrent
+// installs would drop each other's entries.
+//
+// Stops at the first rate-limit and reports what got done rather than emitting
+// a cascade of identical failures. The updates cache needs no invalidation --
+// its fingerprint is built from the registry's sourceSignatures, so a
+// successful update misses the cache on the next check by construction.
+async function updateSkills(ids = []) {
+  const registry = readRegistry();
+  const wanted = new Set((Array.isArray(ids) ? ids : []).map((id) => String(id)));
+  const managed = registry.skills.filter(
+    (skill) =>
+      !skill.trashedAt &&
+      skill.repoOwner &&
+      skill.repoName &&
+      (wanted.size === 0 || wanted.has(skill.id)),
+  );
+
+  const byRepo = new Map();
+  for (const skill of managed) {
+    const branch = skill.repoBranch || "main";
+    const key = `${skill.repoOwner}/${skill.repoName}@${branch}`.toLowerCase();
+    if (!byRepo.has(key)) {
+      byRepo.set(key, { owner: skill.repoOwner, name: skill.repoName, branch, skills: [] });
+    }
+    byRepo.get(key).skills.push(skill);
+  }
+
+  const results = [];
+  let rateLimited = null;
+
+  for (const repo of byRepo.values()) {
+    if (rateLimited) break;
+    let branch;
+    let tree;
+    try {
+      ({ branch, tree } = await getRepoTree(repo));
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        rateLimited = error;
+        break;
+      }
+      for (const skill of repo.skills) {
+        results.push({ id: skill.id, name: skill.name, ok: false, error: error?.message || "Unable to read repository" });
+      }
+      continue;
+    }
+
+    for (const skill of repo.skills) {
+      const sourceDir = skill.sourceDirectory || skill.directory;
+      if (skill.sourceSignature && sourceSignatureFromTree(tree, sourceDir) === skill.sourceSignature) {
+        results.push({ id: skill.id, name: skill.name, ok: true, skipped: true });
+        continue;
+      }
+      try {
+        await installSkill(
+          {
+            key: skill.key,
+            name: skill.name,
+            description: skill.description,
+            // The registry stores the flat install name in .directory; the path
+            // inside the repo lives in .sourceDirectory. installSkill() wants
+            // the repo path.
+            directory: sourceDir,
+            readmeUrl: skill.readmeUrl,
+            repoOwner: skill.repoOwner,
+            repoName: skill.repoName,
+            repoBranch: branch,
+          },
+          skill.targets || [],
+          { branch, tree },
+        );
+        results.push({ id: skill.id, name: skill.name, ok: true, skipped: false });
+      } catch (error) {
+        if (error instanceof RateLimitError) {
+          rateLimited = error;
+          break;
+        }
+        results.push({ id: skill.id, name: skill.name, ok: false, error: error?.message || "Update failed" });
+      }
+    }
+  }
+
+  return {
+    results,
+    updated: results.filter((entry) => entry.ok && !entry.skipped).length,
+    skipped: results.filter((entry) => entry.skipped).length,
+    failed: results.filter((entry) => !entry.ok).length,
+    rateLimited: rateLimited ? rateLimited.message : null,
+  };
+}
+
 // skills.sh exposes only /api/search (no leaderboard endpoint), so "Popular" is
 // built honestly on top of it: fan a handful of broad seed queries, merge by
 // skill key keeping the highest install count, sort by installs. Cached for 6h.
@@ -1380,4 +1478,5 @@ module.exports = {
   sourceSignatureFromTree,
   targetList,
   uninstallSkill,
+  updateSkills,
 };

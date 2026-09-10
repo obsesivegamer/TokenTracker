@@ -3160,6 +3160,13 @@ function createLocalApiHandler({ queuePath }) {
             json(res, { ok: true, skill: await skills.installSkill(body.skill, body.targets || ["claude", "codex"]) });
             return true;
           }
+          if (action === "update_all") {
+            // Partial success is the normal outcome (a repo can rate-limit
+            // mid-run), so this always returns 200 with a per-skill breakdown
+            // rather than failing the whole request.
+            json(res, { ok: true, ...(await skills.updateSkills(body.ids || [])) });
+            return true;
+          }
           if (action === "uninstall") {
             json(res, { ok: true, ...(skills.uninstallSkill(body.id) || {}) });
             return true;

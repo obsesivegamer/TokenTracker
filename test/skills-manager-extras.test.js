@@ -308,3 +308,141 @@ describe("fetchPopularSkillsSh", () => {
     }
   });
 });
+
+describe("updateSkills", () => {
+  // Registry ids are always `${owner}/${name}:${sourceDirectory}` -- installSkill
+  // derives the id it writes from the repo path, so fixtures must agree or an
+  // "update" silently appends a second entry instead of replacing one.
+  const TREE = [
+    { type: "blob", path: "a/SKILL.md", sha: "v1" },
+    { type: "blob", path: "b/SKILL.md", sha: "v1" },
+    { type: "blob", path: "c/SKILL.md", sha: "v1" },
+  ];
+
+  function entry(id, sourceSignature) {
+    const [repo, dir] = id.split(":");
+    const [repoOwner, repoName] = repo.split("/");
+    return {
+      id,
+      key: id,
+      name: dir,
+      directory: dir,
+      sourceDirectory: dir,
+      repoOwner,
+      repoName,
+      repoBranch: "main",
+      sourceSignature,
+      installedAt: 1,
+      targets: [],
+    };
+  }
+
+  function writeUpdateRegistry(entries) {
+    const registryDir = path.join(sandboxHome, ".tokentracker", "skills");
+    fs.mkdirSync(registryDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(registryDir, "registry.json"),
+      JSON.stringify({ repos: [], skills: entries }),
+    );
+  }
+
+  function stubGitHub({ onTree } = {}) {
+    const calls = { tree: 0, raw: 0 };
+    global.fetch = async (url) => {
+      if (String(url).includes("api.github.com")) {
+        calls.tree += 1;
+        const override = onTree ? onTree(calls.tree) : null;
+        if (override) return override;
+        return { ok: true, status: 200, json: async () => ({ tree: TREE }) };
+      }
+      calls.raw += 1;
+      return { ok: true, status: 200, text: async () => "---\nname: Foo\ndescription: d\n---\n" };
+    };
+    return calls;
+  }
+
+  const sigFor = (dir) => skills.sourceSignatureFromTree(TREE, dir);
+
+  it("skips current skills and spends one tree call per repo", async () => {
+    resetRegistry();
+    const realFetch = global.fetch;
+    const calls = stubGitHub();
+    try {
+      writeUpdateRegistry([
+        entry("o/r:a", sigFor("a")),
+        entry("o/r:b", sigFor("b")),
+        entry("o/r2:c", sigFor("c")),
+      ]);
+
+      const res = await skills.updateSkills([]);
+
+      assert.equal(res.skipped, 3, "already-current skills are skipped");
+      assert.equal(res.updated, 0);
+      assert.equal(res.failed, 0);
+      assert.equal(calls.tree, 2, "two repos → two tree calls, not one per skill");
+      assert.equal(calls.raw, 0, "skipped skills download nothing");
+    } finally {
+      global.fetch = realFetch;
+      resetRegistry();
+    }
+  });
+
+  it("re-installs a drifted skill and stores the fresh signature", async () => {
+    resetRegistry();
+    const realFetch = global.fetch;
+    stubGitHub();
+    try {
+      writeUpdateRegistry([entry("o/r:a", "STALE_SIGNATURE")]);
+
+      const res = await skills.updateSkills(["o/r:a"]);
+
+      assert.equal(res.updated, 1, "drifted skill is re-installed");
+      assert.equal(res.failed, 0);
+      const stored = skills.listInstalledSkills().filter((s) => s.id === "o/r:a");
+      assert.equal(stored.length, 1, "updated in place, not duplicated");
+      assert.equal(
+        stored[0].sourceSignature,
+        sigFor("a"),
+        "signature refreshed, so the next check reports no update",
+      );
+    } finally {
+      global.fetch = realFetch;
+      resetRegistry();
+    }
+  });
+
+  it("honours the id filter", async () => {
+    resetRegistry();
+    const realFetch = global.fetch;
+    stubGitHub();
+    try {
+      writeUpdateRegistry([entry("o/r:a", sigFor("a")), entry("o/r2:c", sigFor("c"))]);
+
+      const res = await skills.updateSkills(["o/r:a"]);
+
+      assert.equal(res.results.length, 1, "only the requested id is touched");
+      assert.equal(res.results[0].id, "o/r:a");
+    } finally {
+      global.fetch = realFetch;
+      resetRegistry();
+    }
+  });
+
+  it("stops at a rate limit and reports partial progress", async () => {
+    resetRegistry();
+    const realFetch = global.fetch;
+    stubGitHub({ onTree: (n) => (n === 1 ? null : { ok: false, status: 403, json: async () => ({}) }) });
+    try {
+      writeUpdateRegistry([entry("o/r:a", "STALE_SIGNATURE"), entry("o/r2:c", "STALE_SIGNATURE")]);
+
+      const res = await skills.updateSkills([]);
+
+      assert.equal(res.updated, 1, "work done before the limit is kept");
+      assert.match(res.rateLimited || "", /rate-limited/i, "rate limit is surfaced, not swallowed");
+      assert.equal(res.failed, 0, "a rate limit is not a per-skill failure");
+    } finally {
+      global.fetch = realFetch;
+      resetRegistry();
+    }
+  });
+});

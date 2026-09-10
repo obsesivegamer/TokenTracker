@@ -47,6 +47,7 @@ import {
   searchSkills,
   setSkillTargets,
   uninstallSkill,
+  updateSkills,
 } from "../lib/skills-api";
 import { mergeSkillInventories } from "../lib/skills-inventory";
 import { useInsforgeAuth } from "../contexts/InsforgeAuthContext.jsx";
@@ -529,6 +530,8 @@ function MySkillsView({
   onClearSelection,
   onBulkSync,
   onBulkRemove,
+  updateCount,
+  onUpdateAll,
 }) {
   const selectionCount = selectedIds.size;
   return (
@@ -543,18 +546,37 @@ function MySkillsView({
           onClear={onClearSelection}
         />
       ) : (
-        <FilterToolbar
-          agentFilter={agentFilter}
-          agentOptions={agentOptions}
-          onAgentFilter={onAgentFilter}
-          filteredCount={items.length}
-          totalCount={totalCount}
-          anyFilter={anyFilter}
-          onClearFilters={onClearFilters}
-          searchQuery={searchQuery}
-          onSearchQuery={onSearchQuery}
-          searchPlaceholder={searchPlaceholder}
-        />
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <FilterToolbar
+            agentFilter={agentFilter}
+            agentOptions={agentOptions}
+            onAgentFilter={onAgentFilter}
+            filteredCount={items.length}
+            totalCount={totalCount}
+            anyFilter={anyFilter}
+            onClearFilters={onClearFilters}
+            searchQuery={searchQuery}
+            onSearchQuery={onSearchQuery}
+            searchPlaceholder={searchPlaceholder}
+          />
+          {updateCount ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="mb-2 shrink-0"
+              disabled={busyKey === "update-all"}
+              onClick={onUpdateAll}
+            >
+              {busyKey === "update-all" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ArrowUpCircle className="h-3.5 w-3.5" />
+              )}
+              {copy("skills.update.all_action", { count: updateCount })}
+            </Button>
+          ) : null}
+        </div>
       )}
       {items.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-oai-gray-200 px-4 py-10 text-center text-sm text-oai-gray-500 dark:border-oai-gray-800 dark:text-oai-gray-400">
@@ -1232,6 +1254,45 @@ export function SkillsPage() {
     });
   };
 
+  // `updates` maps every *checked* skill to a boolean, false entries included,
+  // so counting keys would report how many were checked rather than how many
+  // are stale.
+  const updateCount = useMemo(() => Object.values(updates).filter(Boolean).length, [updates]);
+
+  // One call updates every stale skill. The backend groups them by repo, so the
+  // GitHub cost is one tree request per repo rather than one per skill.
+  const handleUpdateAll = () => {
+    const ids = Object.entries(updates)
+      .filter(([, stale]) => stale)
+      .map(([id]) => id);
+    if (!ids.length) return;
+    runMutation("update-all", async () => {
+      const result = await updateSkills(ids);
+      await loadUpdates();
+      const { updated = 0, failed = 0, rateLimited = null } = result || {};
+      if (rateLimited) {
+        showToast({ title: copy("skills.update.rate_limited", { count: updated }), timeout: 6000 });
+      } else if (failed > 0) {
+        showToast({
+          title: copy("skills.toast.updated_partial", { count: updated, total: ids.length, failed }),
+          timeout: 6000,
+        });
+      } else if (updated === 0) {
+        showToast({ title: copy("skills.toast.updated_none"), timeout: 4000 });
+      } else if (updated === 1) {
+        // The common case is a single stale skill; reuse the single-skill toast
+        // so it reads "Updated Poteto Mode." instead of "Updated 1 skills."
+        const only = (result?.results || []).find((item) => item.ok && !item.skipped);
+        showToast({
+          title: copy("skills.toast.updated", { name: only?.name || "" }),
+          timeout: 4000,
+        });
+      } else {
+        showToast({ title: copy("skills.toast.updated_many", { count: updated }), timeout: 4000 });
+      }
+    });
+  };
+
   const handleSearch = async () => {
     const trimmed = query.trim();
     if (trimmed.length < 2) return;
@@ -1412,6 +1473,8 @@ export function SkillsPage() {
         onClearSelection={clearSelection}
         onBulkSync={handleBulkSync}
         onBulkRemove={handleBulkRemove}
+        updateCount={updateCount}
+        onUpdateAll={handleUpdateAll}
       />
     ) : (
       <div className="flex flex-col items-center gap-4 rounded-lg border border-dashed border-oai-gray-200 px-4 py-10 text-center dark:border-oai-gray-800">
