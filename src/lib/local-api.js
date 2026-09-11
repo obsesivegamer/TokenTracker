@@ -3162,7 +3162,7 @@ function createLocalApiHandler({ queuePath }) {
           }
           if (action === "update_all") {
             // Partial success is normal, so this reports per-skill rather than failing.
-            json(res, { ok: true, ...(await skills.updateSkills(body.ids || [])) });
+            json(res, { ok: true, ...(await skills.updateSkills(Array.isArray(body.ids) ? body.ids : [])) });
             return true;
           }
           if (action === "uninstall") {
