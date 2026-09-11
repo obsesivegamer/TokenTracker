@@ -1308,8 +1308,10 @@ async function checkUpdates({ force = false } = {}) {
 // Re-install managed skills from upstream, grouped by repo like checkUpdates()
 // so N skills from one repo cost one tree call. Sequential by necessity:
 // installSkill() read/modify/writes the registry, so parallel installs would
-// drop each other's entries. The updates cache needs no invalidation -- its
-// fingerprint is built from the registry's sourceSignatures.
+// drop each other's entries. A successful update rewrites the skill's
+// sourceSignature, so the updates cache — fingerprinted on those signatures —
+// misses on the next check without explicit invalidation; a run that only skips
+// changes no signature, so the cached verdict (and its badge) survives.
 async function updateSkills(ids = []) {
   const registry = readRegistry();
   const wanted = new Set(Array.isArray(ids) ? ids : []);

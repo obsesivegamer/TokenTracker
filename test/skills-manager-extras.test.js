@@ -310,7 +310,7 @@ describe("fetchPopularSkillsSh", () => {
 });
 
 describe("updateSkills", () => {
-  // Registry ids are always `${owner}/${name}:${sourceDirectory}` -- installSkill
+  // Registry ids are always `${owner}/${name}:${sourceDirectory}` — installSkill
   // derives the id it writes from the repo path, so fixtures must agree or an
   // "update" silently appends a second entry instead of replacing one.
   const TREE = [

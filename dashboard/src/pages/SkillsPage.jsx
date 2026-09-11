@@ -1254,7 +1254,7 @@ export function SkillsPage() {
     });
   };
 
-  // `updates` records every checked skill, false entries included -- counting
+  // `updates` records every checked skill, false entries included — counting
   // keys would report how many were checked, not how many are stale.
   const updateCount = useMemo(() => Object.values(updates).filter(Boolean).length, [updates]);
 
