@@ -1219,6 +1219,8 @@ skills.toast.updated_partial,ui,SkillsPage,SkillsPage,toast_updated_partial,"Upd
 skills.toast.updated_none,ui,SkillsPage,SkillsPage,toast_updated_none,"All skills are already up to date.",,active
 skills.confirm.bulk_remove_title,ui,SkillsPage,SkillsPage,confirm_bulk_remove_title,"Remove {{count}} skills?",,active
 skills.confirm.bulk_remove_desc,ui,SkillsPage,SkillsPage,confirm_bulk_remove_desc,"This unsyncs each skill from every agent and deletes its local copy.",,active
+skills.confirm.update_all_title,ui,SkillsPage,SkillsPage,confirm_update_all_title,"Update {{count}} skills?",,active
+skills.confirm.update_all_desc,ui,SkillsPage,SkillsPage,confirm_update_all_desc,"Each skill is re-downloaded from its source repository, replacing the local copy.",,active
 skills.update.available,ui,SkillsPage,SkillDetailPanel,update_available,"A newer version is available upstream.",,active
 skills.update.action,ui,SkillsPage,SkillDetailPanel,update_action,"Update",,active
 skills.update.all_action,ui,SkillsPage,SkillsPage,update_all_action,"Update all ({{count}})",,active

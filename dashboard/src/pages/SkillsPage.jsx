@@ -857,6 +857,7 @@ export function SkillsPage() {
   const [error, setError] = useState("");
   const [pendingRemove, setPendingRemove] = useState(null);
   const [pendingBulkRemove, setPendingBulkRemove] = useState(null); // array of skills
+  const [pendingUpdateAll, setPendingUpdateAll] = useState(null); // array of stale skill ids
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [updates, setUpdates] = useState({}); // skillId -> bool
   const [usageBySkill, setUsageBySkill] = useState({}); // lowercased dir/name -> usage entry
@@ -933,8 +934,23 @@ export function SkillsPage() {
       const data = await checkSkillUpdates();
       setUpdates(data?.updates || {});
     } catch (_e) {
-      setUpdates({});
+      // Keep the verdicts we already have: clearing them here takes away both
+      // the badges and the Update all button, so a rate-limited user is left
+      // with nothing to retry.
     }
+  }, []);
+
+  // Drop verdicts for skills that no longer exist, so nothing a user just
+  // removed can keep counting toward "Update all".
+  const forgetUpdates = useCallback((ids) => {
+    const gone = new Set((ids || []).filter(Boolean));
+    if (!gone.size) return;
+    setUpdates((prev) => {
+      if (!Object.keys(prev).some((id) => gone.has(id))) return prev;
+      const next = {};
+      for (const [id, stale] of Object.entries(prev)) if (!gone.has(id)) next[id] = stale;
+      return next;
+    });
   }, []);
 
   const loadUsage = useCallback(async () => {
@@ -1123,6 +1139,7 @@ export function SkillsPage() {
       } else {
         await deleteLocalSkill(skill.directory, skill.targets || []);
       }
+      forgetUpdates([skill.id]);
       const canUndo = Boolean(result?.trashed && skill.managed && skill.id);
       showToast({
         title: copy("skills.toast.removed", { name: skill.name || skill.directory }),
@@ -1220,6 +1237,7 @@ export function SkillsPage() {
         if (skill.managed) await uninstallSkill(skill.id);
         else await deleteLocalSkill(skill.directory, skill.targets || []);
       }
+      forgetUpdates(list.map((skill) => skill.id));
       clearSelection();
       showToast({
         title: copy("skills.toast.bulk_removed", { count: list.length }),
@@ -1229,24 +1247,16 @@ export function SkillsPage() {
   };
 
   // Apply an upstream update by re-installing the same skill (overwrites the SSOT
-  // copy + re-syncs to its current targets, then refreshes the update signal).
+  // copy + re-syncs to its targets, then refreshes the update signal). Routed
+  // through the same call as Update all so both take targets from the registry's
+  // intent rather than from whichever agent dirs happen to resolve on disk.
   const handleUpdate = (skill) => {
-    if (!skill?.repoOwner || !skill?.repoName) return;
+    if (!skill?.id || !skill?.repoOwner || !skill?.repoName) return;
     runMutation(installBusyKey(skill), async () => {
-      await installSkill(
-        {
-          key: skill.key,
-          name: skill.name,
-          description: skill.description,
-          directory: skill.sourceDirectory || skill.directory,
-          repoOwner: skill.repoOwner,
-          repoName: skill.repoName,
-          repoBranch: skill.repoBranch,
-          readmeUrl: skill.readmeUrl,
-        },
-        skill.targets && skill.targets.length ? skill.targets : DEFAULT_TARGETS,
-      );
+      const result = await updateSkills([skill.id]);
       await loadUpdates();
+      const row = (result?.results || [])[0];
+      if (row && !row.ok) throw new Error(row.error || copy("skills.error.generic"));
       showToast({
         title: copy("skills.toast.updated", { name: skill.name || skill.directory }),
         timeout: 4000,
@@ -1254,24 +1264,39 @@ export function SkillsPage() {
     });
   };
 
-  // `updates` records every checked skill, false entries included — counting
-  // keys would report how many were checked, not how many are stale.
-  const updateCount = useMemo(() => Object.values(updates).filter(Boolean).length, [updates]);
+  // `updates` records every checked skill, false entries included — counting keys
+  // would report how many were checked, not how many are stale. Intersecting with
+  // what is installed keeps a verdict stranded by a removal (or any other
+  // registry change) from inflating the count. Deliberately not a useMemo: the
+  // local-only early return above sits between this and the hooks.
+  const installedSkillIds = new Set((installedData.skills || []).map((skill) => skill.id).filter(Boolean));
+  const staleUpdateIds = Object.entries(updates)
+    .filter(([id, stale]) => stale && installedSkillIds.has(id))
+    .map(([id]) => id);
+  const updateCount = staleUpdateIds.length;
 
   const handleUpdateAll = () => {
-    const ids = Object.entries(updates)
-      .filter(([, stale]) => stale)
-      .map(([id]) => id);
-    if (!ids.length) return;
+    if (!staleUpdateIds.length) return;
+    setPendingUpdateAll(staleUpdateIds);
+  };
+
+  const confirmUpdateAll = () => {
+    const ids = pendingUpdateAll;
+    setPendingUpdateAll(null);
+    if (!ids || !ids.length) return;
     runMutation("update-all", async () => {
       const result = await updateSkills(ids);
       await loadUpdates();
       const { updated = 0, failed = 0, rateLimited = null, results = [] } = result || {};
+      // Total is the rows the backend actually returned, so updated + failed
+      // always reconciles with it — ids it could not match report as failures
+      // rather than vanishing from the arithmetic.
+      const attempted = results.length;
       if (rateLimited) {
         showToast({ title: copy("skills.update.rate_limited", { count: updated }), timeout: 6000 });
       } else if (failed > 0) {
         showToast({
-          title: copy("skills.toast.updated_partial", { count: updated, total: ids.length, failed }),
+          title: copy("skills.toast.updated_partial", { count: updated, total: attempted, failed }),
           timeout: 6000,
         });
       } else if (updated === 0) {
@@ -1870,6 +1895,17 @@ export function SkillsPage() {
         busy={busyKey === "batch"}
         onCancel={() => setPendingBulkRemove(null)}
         onConfirm={confirmBulkRemove}
+      />
+
+      <ConfirmModal
+        open={Boolean(pendingUpdateAll)}
+        title={copy("skills.confirm.update_all_title", { count: pendingUpdateAll?.length || 0 })}
+        description={copy("skills.confirm.update_all_desc")}
+        confirmLabel={copy("skills.update.action")}
+        cancelLabel={copy("shared.action.cancel")}
+        busy={busyKey === "update-all"}
+        onCancel={() => setPendingUpdateAll(null)}
+        onConfirm={confirmUpdateAll}
       />
     </div>
   );
