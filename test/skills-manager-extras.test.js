@@ -27,6 +27,13 @@ function writeSkillDir(dir, marker = "SKILL.md", body = "---\nname: Demo\ndescri
   return dir;
 }
 
+// Match the host exactly. A substring test would also accept
+// api.github.com.example.test, which CodeQL flags as incomplete URL
+// sanitization, and these stubs decide a canned response from it.
+function isGitHubApi(url) {
+  return new URL(String(url)).hostname === "api.github.com";
+}
+
 function resetRegistry() {
   const file = path.join(sandboxHome, ".tokentracker", "skills", "registry.json");
   try {
@@ -349,7 +356,7 @@ describe("updateSkills", () => {
   function stubGitHub({ onTree } = {}) {
     const calls = { tree: 0, raw: 0 };
     global.fetch = async (url) => {
-      if (String(url).includes("api.github.com")) {
+      if (isGitHubApi(url)) {
         calls.tree += 1;
         const override = onTree ? onTree(calls.tree) : null;
         if (override) return override;
@@ -501,7 +508,7 @@ describe("updateSkills cache priming", () => {
   function stub({ onTree } = {}) {
     const calls = { tree: 0 };
     global.fetch = async (url) => {
-      if (String(url).includes("api.github.com")) {
+      if (isGitHubApi(url)) {
         calls.tree += 1;
         const override = onTree ? onTree(calls.tree) : null;
         if (override) return override;
@@ -608,7 +615,7 @@ describe("updateSkills cache priming", () => {
     const realFetch = global.fetch;
     let dropped = false;
     global.fetch = async (url) => {
-      if (String(url).includes("api.github.com")) {
+      if (isGitHubApi(url)) {
         return { ok: true, status: 200, json: async () => ({ tree: TREE }) };
       }
       if (!dropped) {
@@ -697,7 +704,7 @@ describe("checkUpdates when a repo cannot be reached", () => {
     const cachePath = path.join(skillsDir, "updates-cache.json");
     // Every tree call fails the way an offline box or a 404'd repo does.
     global.fetch = async (url) => {
-      if (String(url).includes("api.github.com")) return { ok: false, status: 404, json: async () => ({}) };
+      if (isGitHubApi(url)) return { ok: false, status: 404, json: async () => ({}) };
       return { ok: true, status: 200, text: async () => "" };
     };
     try {
