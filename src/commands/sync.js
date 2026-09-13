@@ -115,6 +115,8 @@ const {
   parseUnslothIncremental,
   resolveAnythingllmDbPath,
   parseAnythingllmIncremental,
+  resolveDevinDbPath,
+  parseDevinIncremental,
   resolveGooseDbPath,
   parseGooseIncremental,
   listDroidSettingsFiles,
@@ -280,6 +282,7 @@ const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["roo-code", "roocode"],
 ]);
 const AUTO_SYNC_SOURCES = new Set([
+  "acode",
   "antigravity",
   "anythingllm",
   "claude",
@@ -289,6 +292,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "copilot",
   "craft",
   "cursor",
+  "devin",
   "droid",
   "dsh",
   "every-code",
@@ -319,6 +323,7 @@ const AUTO_SYNC_SOURCES = new Set([
 ]);
 const BACKGROUND_AUTO_SYNC_SOURCES = new Set([
   // Keep unscoped native 5-minute syncs bounded to dated local session trees.
+  "acode",
   "codex",
   "every-code",
   "reasonix",
@@ -706,15 +711,53 @@ async function cmdSync(argv, context = {}) {
         union: true,
       });
       if (codexPaths.native) {
-        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "sessions"), codexInventoryCache: true });
+        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
         if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "archived_sessions"), deep: true });
         }
       }
       if (codexPaths.wsl) {
-        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), codexInventoryCache: true });
+        sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
         if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "archived_sessions"), deep: true });
+        }
+      }
+    }
+    if (sourceAllowed("acode")) {
+      const acodeNativeValue =
+        process.env.TOKENTRACKER_ACODE_HOME || path.join(home, ".acode");
+      const acodePaths = resolveInstallPaths({
+        nativeValue: acodeNativeValue,
+        wslDir: ".acode",
+        requireAnyChild: ["sessions", "archived_sessions"],
+        union: true,
+      });
+      if (acodePaths.native) {
+        sources.push({
+          source: "acode",
+          sessionsDir: path.join(acodePaths.native, "sessions"),
+          inventoryCacheKey: "acodeDayInventoryCache",
+        });
+        if (!isBackgroundLightweightSync) {
+          sources.push({
+            source: "acode",
+            sessionsDir: path.join(acodePaths.native, "archived_sessions"),
+            deep: true,
+          });
+        }
+      }
+      if (acodePaths.wsl) {
+        sources.push({
+          source: "acode",
+          sessionsDir: path.join(acodePaths.wsl, "sessions"),
+          inventoryCacheKey: "acodeDayInventoryCache",
+        });
+        if (!isBackgroundLightweightSync) {
+          sources.push({
+            source: "acode",
+            sessionsDir: path.join(acodePaths.wsl, "archived_sessions"),
+            deep: true,
+          });
         }
       }
     }
@@ -734,21 +777,28 @@ async function cmdSync(argv, context = {}) {
 
     const rolloutFiles = [];
     const seenSessions = new Set();
-    const codexDayInventoryCache =
-      cursors.codexDayInventoryCache && typeof cursors.codexDayInventoryCache === "object"
-        ? cursors.codexDayInventoryCache
-        : { version: 1, days: {} };
-    if (sourceAllowed("codex")) cursors.codexDayInventoryCache = codexDayInventoryCache;
     const uniqueSources = sources.filter((entry) => {
       if (seenSessions.has(entry.sessionsDir)) return false;
       seenSessions.add(entry.sessionsDir);
       return true;
     });
+    const inventoryCaches = new Map();
+    const inventoryCacheKeys = new Set(
+      uniqueSources.map((entry) => entry.inventoryCacheKey).filter(Boolean),
+    );
+    for (const cursorKey of inventoryCacheKeys) {
+      const inventoryCache =
+        cursors[cursorKey] && typeof cursors[cursorKey] === "object"
+          ? cursors[cursorKey]
+          : { version: 1, days: {} };
+      cursors[cursorKey] = inventoryCache;
+      inventoryCaches.set(cursorKey, inventoryCache);
+    }
     const sourceFileGroups = await Promise.all(uniqueSources.map((entry) => (
       entry.deep
         ? listRolloutFilesDeep(entry.sessionsDir)
-        : listRolloutFiles(entry.sessionsDir, entry.codexInventoryCache
-          ? { dayInventoryCache: codexDayInventoryCache }
+        : listRolloutFiles(entry.sessionsDir, entry.inventoryCacheKey
+          ? { dayInventoryCache: inventoryCaches.get(entry.inventoryCacheKey) }
           : undefined)
     )));
     for (let sourceIndex = 0; sourceIndex < uniqueSources.length; sourceIndex++) {
@@ -1546,7 +1596,7 @@ async function cmdSync(argv, context = {}) {
     }
 
     // ── DeepSeek Harness — passive read of ~/.dsh/sessions session logs ──
-    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    let dshResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, deferredMigrations: 0 };
     if (sourceAllowed("dsh")) {
       await migrateLegacyDeepseekHarnessSource({ cursors, queuePath, queueStatePath });
       const dshSessionFiles = await resolveDshSessionFiles(process.env);
@@ -1565,6 +1615,15 @@ async function cmdSync(argv, context = {}) {
             queuePath,
             onProgress: makeProviderProgress("DeepSeek Harness"),
           });
+          if (dshResult.deferredMigrations > 0) {
+            warnProviderParseFailure(
+              "DeepSeek Harness",
+              new Error(
+                `${dshResult.deferredMigrations} artifact migration(s) deferred; inspect cursors.dsh.deferredMigrations and retry after the replacement is complete`,
+              ),
+              opts,
+            );
+          }
         } catch (err) {
           warnProviderParseFailure("DeepSeek Harness", err, opts);
         }
@@ -1627,6 +1686,26 @@ async function cmdSync(argv, context = {}) {
           });
         } catch (err) {
           warnProviderParseFailure("AnythingLLM", err, opts);
+        }
+      }
+    }
+
+    // ── Devin CLI (Cognition) — SQLite message_nodes chat_message metrics ──
+    let devinResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("devin")) {
+      const devinDbPath = resolveDevinDbPath(process.env);
+      if (devinDbPath && fssync.existsSync(devinDbPath)) {
+        if (progress?.enabled) progress.start(`Parsing Devin ${renderBar(0)} | buckets 0`);
+        try {
+          devinResult = await parseDevinIncremental({
+            dbPath: devinDbPath,
+            cursors,
+            queuePath,
+            projectQueuePath,
+            onProgress: makeProviderProgress("Devin"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("Devin", err, opts);
         }
       }
     }
@@ -2337,6 +2416,7 @@ async function cmdSync(argv, context = {}) {
           sessionFiles: piFiles,
           cursors,
           queuePath,
+          projectQueuePath,
           env: process.env,
           onProgress: (p) => {
             if (!progress?.enabled) return;
@@ -2885,6 +2965,7 @@ async function cmdSync(argv, context = {}) {
       lmstudioResult.recordsProcessed +
       unslothResult.recordsProcessed +
       anythingllmResult.recordsProcessed +
+      devinResult.recordsProcessed +
       kiloResult.recordsProcessed +
       mimoResult.recordsProcessed +
       zcodeResult.recordsProcessed +
@@ -2923,6 +3004,7 @@ async function cmdSync(argv, context = {}) {
       lmstudioResult.bucketsQueued +
       unslothResult.bucketsQueued +
       anythingllmResult.bucketsQueued +
+      devinResult.bucketsQueued +
       kiloResult.bucketsQueued +
       mimoResult.bucketsQueued +
       zcodeResult.bucketsQueued +
