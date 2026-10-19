@@ -283,6 +283,8 @@ function grokProductWindowSpecs(data) {
       key: `product-${product}`,
       ...(labelKey ? { labelKey } : { label }),
       window: entry.window,
+      // A share of the pool. Remaining mode must not redraw it as 100 − used.
+      share: true,
     });
   }
   return rows;
