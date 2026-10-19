@@ -1561,9 +1561,16 @@ struct ClawdCompanionView: View {
             (Strings.kiroMonthLabel, limits.kiro.primaryWindow), (Strings.kiroBonusLabel, limits.kiro.secondaryWindow)
         ])
         if let grok = limits.grok {
-            generic("grok", configured: grok.configured, error: grok.error, windows: [
-                (Strings.grokPrimaryLabel(periodType: grok.periodType), grok.primaryWindow), (Strings.grokOndemandLabel, grok.secondaryWindow)
-            ])
+            var grokWindows: [(String, GenericLimitWindow?)] = [
+                (Strings.grokPrimaryLabel(periodType: grok.periodType), grok.primaryWindow),
+                (Strings.grokOndemandLabel, grok.secondaryWindow),
+            ]
+            for entry in grok.products ?? [] {
+                guard let product = entry.product, !product.isEmpty else { continue }
+                let label = Strings.grokProductLabel(product: product, fallback: entry.label)
+                if !label.isEmpty { grokWindows.append((label, entry.window)) }
+            }
+            generic("grok", configured: grok.configured, error: grok.error, windows: grokWindows)
         }
         if let copilot = limits.copilot {
             generic("copilot", configured: copilot.configured, error: copilot.error, windows: [

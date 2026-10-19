@@ -518,6 +518,13 @@ struct UsageLimitsView: View {
             s.append(makeSpec(Strings.grokPrimaryLabel(periodType: g.periodType), w.usedPercent, windowSeconds: windowSeconds, iso: w.resetAt))
         }
         if let w = g.secondaryWindow { s.append(makeSpec(Strings.grokOndemandLabel, w.usedPercent, iso: w.resetAt)) }
+        // No windowSeconds: a product percent is a share of the pool, not its own quota.
+        for entry in g.products ?? [] {
+            guard let window = entry.window, let product = entry.product, !product.isEmpty else { continue }
+            let label = Strings.grokProductLabel(product: product, fallback: entry.label)
+            guard !label.isEmpty else { continue }
+            s.append(makeSpec(label, window.usedPercent, iso: window.resetAt))
+        }
         return s
     }
 
