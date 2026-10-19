@@ -41,10 +41,14 @@ function buildGrokPoolTokenEstimate({ products, periodStart, rows }) {
     if (!ESTIMATED_PRODUCTS.has(product)) continue;
     const percent = Number(entry?.window?.used_percent);
     if (!Number.isFinite(percent) || percent <= 0) continue;
+    const estimatedTokens = Math.round(percent * perPoint);
+    // A share that rounds to zero tokens is not a figure. Omit it so the
+    // card does not render an Estimate heading with no product rows.
+    if (!(estimatedTokens > 0)) continue;
     estimateRows.push({
       product,
       usage_percent: percent,
-      estimated_tokens: Math.round(percent * perPoint),
+      estimated_tokens: estimatedTokens,
     });
   }
   if (estimateRows.length === 0) return null;

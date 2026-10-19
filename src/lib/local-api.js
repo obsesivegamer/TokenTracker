@@ -3561,7 +3561,7 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
             const estimate = buildGrokPoolTokenEstimate({
               products: data.grok.products,
               periodStart: data.grok.billing_period_start,
-              rows: await readQueueData(resolveQueuePath()),
+              rows: await readQueueData(qp),
             });
             if (estimate) {
               response = { ...data, grok: { ...data.grok, token_estimate: estimate } };

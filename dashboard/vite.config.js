@@ -1100,30 +1100,6 @@ async function handleLocalApi(req, res, url) {
   }
 
 
-  // 处理 usage-limits
-  if (pathname === "/functions/tokentracker-usage-limits") {
-    try {
-      const esmRequire = createRequire(import.meta.url);
-      const { getUsageLimits, resetUsageLimitsCache } = esmRequire("../src/lib/usage-limits");
-      const forceRefresh = url.searchParams.get("refresh");
-      if (forceRefresh === "1" || forceRefresh === "true") {
-        resetUsageLimitsCache();
-      }
-      const data = await getUsageLimits({
-        home: os.homedir(),
-        env: process.env,
-        platform: process.platform,
-      });
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(data));
-    } catch (e) {
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: e?.message || "Unknown error" }));
-    }
-    return true;
-  }
-
   // 处理 user-status
   if (pathname === "/functions/tokentracker-user-status") {
     res.setHeader("Content-Type", "application/json");
@@ -1240,7 +1216,11 @@ function localDataApiPlugin() {
         // Serve the checkout implementation so a stale packaged desktop app (or
         // Windows DoSvc occupying :7680) cannot hide newly supported tool roots.
         const isRepoSkillsApi = url.pathname === "/functions/tokentracker-skills";
-        if (isRepoPetApi || isRepoProjectUsageApi || isRepoSessionAnalyticsApi || isRepoSkillsApi) {
+        // Usage limits, including the pool estimate, live in this checkout's
+        // local-api handler. The Vite mock returned getUsageLimits() alone,
+        // so dashboard:dev hid the estimate that `tracker serve` shows.
+        const isRepoUsageLimitsApi = url.pathname === "/functions/tokentracker-usage-limits";
+        if (isRepoPetApi || isRepoProjectUsageApi || isRepoSessionAnalyticsApi || isRepoSkillsApi || isRepoUsageLimitsApi) {
           Promise.resolve(handleRepoLocalApi(req, res, url))
             .then((handled) => { if (!handled) next(); })
             .catch(next);
