@@ -133,6 +133,11 @@ const CODEX_LIMITS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // of a flash of "fetch failed" (mirrors Claude / Codex / Antigravity).
 const OPENCODE_GO_LIMITS_CACHE_FILE = "opencode-go-usage-limits-cache.json";
 const OPENCODE_GO_LIMITS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// The weekly credits billing call can 503 and fall through to a legacy payload
+// whose monthly limit is 0. That parse error hid the pool and the estimate.
+// Keep the last unified snapshot until its reset, the same way Codex does.
+const GROK_LIMITS_CACHE_FILE = "grok-usage-limits-cache.json";
+const GROK_LIMITS_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const OPENCODE_GO_LOCAL_ESTIMATE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 // A 429 from the usage endpoint carries a long `retry-after` (often 20+ minutes). Persist
 // the cooldown so every surface — this process, the menu bar app's embedded server, a later
@@ -2657,6 +2662,126 @@ function readOpencodeGoLimitsCache({ home, nowMs = Date.now() } = {}) {
   }
 }
 
+function resolveGrokLimitsCachePath({ home } = {}) {
+  return path.join(home || os.homedir(), ".tokentracker", "tracker", GROK_LIMITS_CACHE_FILE);
+}
+
+function grokLimitsAuthError(limits) {
+  return typeof limits?.error === "string"
+    && /Not logged in to Grok Build|Grok session expired/.test(limits.error);
+}
+
+function isGrokCacheWindowUsable(window, { nowMs } = {}) {
+  if (!window || typeof window !== "object") return false;
+  const pct = Number(window.used_percent);
+  if (!Number.isFinite(pct) || pct < 0) return false;
+  const resetAtMs = parseTimeMs(window.reset_at);
+  if (resetAtMs === null) return false;
+  return resetAtMs > nowMs;
+}
+
+function grokCacheWindow(window) {
+  if (!window || typeof window !== "object") return null;
+  const pct = Number(window.used_percent);
+  if (!Number.isFinite(pct)) return null;
+  const resetAt = typeof window.reset_at === "string" && window.reset_at ? window.reset_at : null;
+  return { used_percent: pct, reset_at: resetAt };
+}
+
+function normalizeGrokCachedLimits(raw, { nowMs = Date.now() } = {}) {
+  const cachedAtMs = parseTimeMs(raw?.cached_at);
+  if (!Number.isFinite(cachedAtMs)) return null;
+  if (cachedAtMs > nowMs + 60_000) return null;
+  if (nowMs - cachedAtMs > GROK_LIMITS_CACHE_MAX_AGE_MS) return null;
+  const primary = isGrokCacheWindowUsable(raw?.primary_window, { nowMs }) ? grokCacheWindow(raw.primary_window) : null;
+  if (!primary) return null;
+  const products = Array.isArray(raw?.products)
+    ? raw.products.flatMap((entry) => {
+        if (!entry || typeof entry.product !== "string" || typeof entry.label !== "string") return [];
+        const window = isGrokCacheWindowUsable(entry.window, { nowMs }) ? grokCacheWindow(entry.window) : null;
+        if (!window) return [];
+        return [{ product: entry.product, label: entry.label, window }];
+      })
+    : [];
+  if (products.length === 0) return null;
+  const periodStartMs = parseTimeMs(raw?.billing_period_start);
+  if (periodStartMs === null) return null;
+  return {
+    configured: true,
+    error: null,
+    plan_label: typeof raw?.plan_label === "string" ? raw.plan_label : null,
+    period_type: typeof raw?.period_type === "string" ? raw.period_type : null,
+    billing_period_start: new Date(periodStartMs).toISOString(),
+    credit_usage_percent: Number.isFinite(Number(raw?.credit_usage_percent))
+      ? Number(raw.credit_usage_percent)
+      : primary.used_percent,
+    primary_window: primary,
+    secondary_window: isGrokCacheWindowUsable(raw?.secondary_window, { nowMs })
+      ? grokCacheWindow(raw.secondary_window)
+      : null,
+    products,
+    stale: true,
+    cached_at: raw.cached_at,
+  };
+}
+
+function readGrokLimitsCache({ home, nowMs = Date.now() } = {}) {
+  const cachePath = resolveGrokLimitsCachePath({ home });
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    return normalizeGrokCachedLimits(parsed?.grok, { nowMs });
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeGrokLimitsCache(limits, { home, nowMs = Date.now() } = {}) {
+  if (!limits?.configured || limits.error || !limits.primary_window) return;
+  if (!Array.isArray(limits.products) || limits.products.length === 0) return;
+  if (typeof limits.billing_period_start !== "string") return;
+  const cachePath = resolveGrokLimitsCachePath({ home });
+  const payload = {
+    grok: {
+      plan_label: limits.plan_label || null,
+      period_type: limits.period_type || null,
+      billing_period_start: limits.billing_period_start,
+      credit_usage_percent: limits.credit_usage_percent ?? limits.primary_window.used_percent,
+      primary_window: grokCacheWindow(limits.primary_window),
+      secondary_window: grokCacheWindow(limits.secondary_window),
+      products: limits.products.map((entry) => ({
+        product: entry.product,
+        label: entry.label,
+        window: grokCacheWindow(entry.window),
+      })),
+      cached_at: new Date(nowMs).toISOString(),
+    },
+  };
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    const tmpPath = `${cachePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tmpPath, cachePath);
+  } catch (_error) {}
+}
+
+// A live unified pool replaces the snapshot. A 503, timeout, or unparseable
+// legacy payload keeps the snapshot until its reset. A login error stays visible.
+function applyGrokLimitsCache(grok, { home, nowMs }) {
+  if (!grok || grok.configured === false || grokLimitsAuthError(grok)) return grok;
+  if (
+    !grok.error
+    && grok.primary_window
+    && Array.isArray(grok.products)
+    && grok.products.length > 0
+    && typeof grok.billing_period_start === "string"
+  ) {
+    const fresh = { ...grok, stale: false, cached_at: new Date(nowMs).toISOString() };
+    writeGrokLimitsCache(fresh, { home, nowMs });
+    return fresh;
+  }
+  return readGrokLimitsCache({ home, nowMs }) || grok;
+}
+
 function writeOpencodeGoLimitsCache(limits, { home, nowMs = Date.now() } = {}) {
   if (!limits?.configured || limits.error || !hasOpencodeGoWindow(limits)) return;
   const cachePath = resolveOpencodeGoLimitsCachePath({ home });
@@ -4430,7 +4555,8 @@ async function fetchUsageLimitsUncached({
       : { configured: true, error: reason?.message || "Unknown error" };
   }
 
-  const cursorLimits = cursorSandDuplicatesGrokPool(cursor, grok)
+  const grokLimits = applyGrokLimitsCache(grok, { home, nowMs });
+  const cursorLimits = cursorSandDuplicatesGrokPool(cursor, grokLimits)
     ? { ...cursor, quaternary_window: null }
     : cursor;
 
@@ -4454,7 +4580,7 @@ async function fetchUsageLimitsUncached({
     // outright, so surface the label as-is like CommandCode below. Error and
     // unconfigured branches never carry plan_label, so the panel still falls
     // back to the bare brand name.
-    grok,
+    grok: grokLimits,
     zcode: withPlanLabel(zcode, zcode.plan_label, "ZCode"),
     opencodeGo: withPlanLabel(opencodeGo, opencodeGo?.plan_label, "OpenCode Go"),
     // CommandCode tiers are acronym brands (GOAT/Pro/Max) — the fetcher already

@@ -3564,6 +3564,10 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
               rows: await readQueueData(qp),
             });
             if (estimate) {
+              if (data.grok.stale === true) {
+                estimate.stale = true;
+                estimate.cached_at = typeof data.grok.cached_at === "string" ? data.grok.cached_at : null;
+              }
               response = { ...data, grok: { ...data.grok, token_estimate: estimate } };
             }
           } catch {

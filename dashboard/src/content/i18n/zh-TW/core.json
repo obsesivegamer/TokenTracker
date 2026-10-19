@@ -165,6 +165,7 @@
   "limits.label.grok_cursor": "Cursor",
   "limits.estimate.title": "估算",
   "limits.estimate.note": "依已記錄的 {{tokens}} 個 Grok Build token（本池的 {{percent}}%）等比放大。不計入 token 總量。快取讀取按完整 token 計數。",
+  "limits.estimate.stale": "用量百分比來自上一次成功的帳單讀取。",
   "limits.provider.claude": "Claude",
   "limits.provider.codex": "Codex",
   "limits.provider.cursor": "Cursor",

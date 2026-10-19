@@ -65,6 +65,11 @@ export function GrokPoolEstimate({ estimate }) {
           percent: formatEstimatePercent(basisPercent),
         })}
       </p>
+      {estimate.stale ? (
+        <p className="mt-1 text-[11px] leading-snug text-oai-gray-500 dark:text-oai-gray-400">
+          {copy("limits.estimate.stale")}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -160,6 +160,7 @@
   "limits.label.grok_cursor": "Cursor",
   "limits.estimate.title": "推定",
   "limits.estimate.note": "計測済みの Grok Build {{tokens}} トークン（このプールの {{percent}}%）から比例配分。トークン合計には含めません。キャッシュ読み取りは1トークンとして数えます。",
+  "limits.estimate.stale": "割合は最後に成功した請求の読み取り時点のものです。",
   "limits.provider.claude": "Claude",
   "limits.provider.codex": "Codex",
   "limits.provider.cursor": "Cursor",
