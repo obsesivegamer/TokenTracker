@@ -770,6 +770,8 @@ limits.label.grok_bot,ui,LimitsPage,UsageLimitsPanel,grok_bot,"Grok Bot",,active
 limits.label.grok_chat,ui,LimitsPage,UsageLimitsPanel,grok_chat,"Chat",,active
 limits.label.grok_imagine,ui,LimitsPage,UsageLimitsPanel,grok_imagine,"Imagine",,active
 limits.label.grok_cursor,ui,LimitsPage,UsageLimitsPanel,grok_cursor,"Cursor",,active
+limits.estimate.title,ui,LimitsPage,GrokPoolEstimate,title,"Estimate",,active
+limits.estimate.note,ui,LimitsPage,GrokPoolEstimate,note,"Scaled from {{tokens}} measured Grok Build tokens ({{percent}}% of this pool). Not included in the token total. Cache reads count as full tokens.",,active
 limits.provider.claude,ui,LimitsPage,UsageLimitsPanel,provider_claude,"Claude",,active
 limits.provider.codex,ui,LimitsPage,UsageLimitsPanel,provider_codex,"Codex",,active
 limits.provider.cursor,ui,LimitsPage,UsageLimitsPanel,provider_cursor,"Cursor",,active

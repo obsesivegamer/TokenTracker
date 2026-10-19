@@ -158,6 +158,8 @@
   "limits.label.grok_chat": "채팅",
   "limits.label.grok_imagine": "Imagine",
   "limits.label.grok_cursor": "Cursor",
+  "limits.estimate.title": "추정",
+  "limits.estimate.note": "측정된 Grok Build 토큰 {{tokens}}(이 풀의 {{percent}}%)로 비례 환산했습니다. 토큰 합계에는 포함되지 않습니다. 캐시 읽기도 토큰 전체로 셉니다.",
   "limits.provider.claude": "Claude",
   "limits.provider.codex": "Codex",
   "limits.provider.cursor": "Cursor",

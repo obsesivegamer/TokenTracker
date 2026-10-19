@@ -14,6 +14,7 @@ import { ProviderIcon } from "./ProviderIcon.jsx";
 import { buildResetBankRows } from "./usage-limits-reset-bank.js";
 import { PROVIDER_LIMIT_SPECS } from "./usage-limits-provider-specs.js";
 import { HoverTooltip } from "../../components/HoverTooltip.jsx";
+import { GrokPoolEstimate } from "./GrokPoolEstimate.jsx";
 import { cycleView, countdownText, remainingLabel } from "../../../lib/subscription-display.js";
 
 const LIMITS_PROVIDER_ICON_CLASS = "shrink-0 text-oai-black dark:text-oai-white";
@@ -740,6 +741,7 @@ function renderConfiguredProvider(id, data, title, mode, expanded, onToggle, bad
       toggleOnHeader={id === "zcode"}
     >
       <LimitWindowSection mode={mode} rows={rows} extra={extra} />
+      {id === "grok" ? <GrokPoolEstimate estimate={data.token_estimate} /> : null}
       {subscription ? <SubscriptionBar subscription={subscription} now={now} mode={mode} /> : null}
       {expanded ? <LimitDetail rows={rows} mode={mode} now={now} /> : null}
       {expanded && subscription ? (

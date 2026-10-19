@@ -3554,7 +3554,23 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
           forceRefresh,
           devinEnabled,
         });
-        json(res, data);
+        let response = data;
+        if (data?.grok && data.grok.error == null && data.grok.billing_period_start) {
+          try {
+            const { buildGrokPoolTokenEstimate } = require("./grok-pool-estimate");
+            const estimate = buildGrokPoolTokenEstimate({
+              products: data.grok.products,
+              periodStart: data.grok.billing_period_start,
+              rows: await readQueueData(resolveQueuePath()),
+            });
+            if (estimate) {
+              response = { ...data, grok: { ...data.grok, token_estimate: estimate } };
+            }
+          } catch {
+            // The limits card still renders when the token ruler cannot be read.
+          }
+        }
+        json(res, response);
       } catch (e) {
         json(res, { error: e?.message || "Unknown error" }, 500);
       }

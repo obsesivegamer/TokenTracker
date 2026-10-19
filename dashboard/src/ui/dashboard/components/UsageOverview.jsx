@@ -35,6 +35,7 @@ import { ProviderIcon } from "./ProviderIcon.jsx";
 import { formatUsdCurrency } from "../../../lib/format";
 import { buildAllModels, hasModelTokenSplits } from "../../../lib/model-breakdown";
 import { ContextBreakdownPanel } from "./ContextBreakdownPanel.jsx";
+import { GrokPoolEstimate } from "./GrokPoolEstimate.jsx";
 
 const ALL_PROVIDERS_KEY = "__all__";
 const FULL_SHARE_LABEL = `${(100).toFixed(2)}%`;
@@ -231,6 +232,7 @@ export function UsageOverview({
   deviceOptions = [],
   selectedDevice = "",
   onDeviceChange,
+  poolEstimate = null,
 }) {
   const tabs = normalizePeriods(periods);
   const dateLocale = getDateFnsLocale(getCopyLocale());
@@ -493,6 +495,11 @@ export function UsageOverview({
               <SummaryValueSkeleton />
             </div>
           </div>
+          {poolEstimate ? (
+            <div className="mt-4 flex justify-center text-left">
+              <GrokPoolEstimate estimate={poolEstimate} />
+            </div>
+          ) : null}
           {summaryCostValue && (
             <div className="flex items-center justify-center gap-2 mt-4">
               {onCostInfo ? (

@@ -163,6 +163,8 @@
   "limits.label.grok_chat": "聊天",
   "limits.label.grok_imagine": "Imagine",
   "limits.label.grok_cursor": "Cursor",
+  "limits.estimate.title": "估算",
+  "limits.estimate.note": "按已记录的 {{tokens}} 个 Grok Build token（本池的 {{percent}}%）等比放大。不计入 token 总量。缓存读取按完整 token 计数。",
   "limits.provider.claude": "Claude",
   "limits.provider.codex": "Codex",
   "limits.provider.cursor": "Cursor",

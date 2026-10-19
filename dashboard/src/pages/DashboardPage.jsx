@@ -1433,6 +1433,7 @@ export function DashboardPage({
       onToggleSummaryFormat={toggleSummaryFormat}
       summaryTotalTokensRaw={toFiniteNumber(summaryTotalTokens) || 0}
       summaryCostValue={summaryCostValue}
+      poolEstimate={usageLimits?.grok?.token_estimate || null}
       summaryConversationsValue={summaryConversationsValue}
       rollingUsage={rolling}
       costInfoEnabled={costInfoEnabled}

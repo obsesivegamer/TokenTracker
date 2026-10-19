@@ -412,6 +412,8 @@
   "limits.label.grok_chat": "Chat",
   "limits.label.grok_imagine": "Imagine",
   "limits.label.grok_cursor": "Cursor",
+  "limits.estimate.title": "Schätzung",
+  "limits.estimate.note": "Hochgerechnet aus {{tokens}} gemessenen Grok-Build-Tokens ({{percent}}% dieses Pools). Nicht in der Token-Summe. Cache-Lesezugriffe zählen als volle Tokens.",
   "limits.label.opencode_go_5h": "5h",
   "limits.label.opencode_go_monthly": "Monatlich",
   "limits.label.qoder_credits": "Credits",

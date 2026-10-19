@@ -158,6 +158,8 @@
   "limits.label.grok_chat": "チャット",
   "limits.label.grok_imagine": "Imagine",
   "limits.label.grok_cursor": "Cursor",
+  "limits.estimate.title": "推定",
+  "limits.estimate.note": "計測済みの Grok Build {{tokens}} トークン（このプールの {{percent}}%）から比例配分。トークン合計には含めません。キャッシュ読み取りは1トークンとして数えます。",
   "limits.provider.claude": "Claude",
   "limits.provider.codex": "Codex",
   "limits.provider.cursor": "Cursor",

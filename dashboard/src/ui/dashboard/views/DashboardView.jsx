@@ -152,6 +152,7 @@ export function DashboardView(props) {
     onToggleSummaryFormat,
     summaryTotalTokensRaw,
     summaryCostValue,
+    poolEstimate,
     summaryConversationsValue,
     rollingUsage,
     costInfoEnabled,
@@ -322,6 +323,7 @@ export function DashboardView(props) {
               providersLoading={providersLoading}
               onToggleSummaryFormat={hasSummary ? onToggleSummaryFormat : null}
               summaryCostValue={summaryCostValue}
+              poolEstimate={poolEstimate}
               onCostInfo={costInfoEnabled ? openCostModal : null}
               fleetData={fleetData}
               onRefresh={screenshotMode ? null : refreshAll}
