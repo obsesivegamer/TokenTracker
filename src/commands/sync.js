@@ -321,6 +321,11 @@ const ZCODE_INCLUSIVE_TOKEN_REPAIR_KEY = "zcodeInclusiveTokenRepair_2026_09";
 // lower, and the wipe helpers below now preserve hours older than the live
 // rebuild floor so a future re-key cannot repeat the loss.
 const ZCODE_PRUNE_WINDOW_RESTORE_KEY = "zcodePruneWindowRestore_2026_10";
+// The same wipe removed pre-window rows from project.queue.jsonl (no zero
+// retraction, so the file simply lost them) and deleted projectHourly buckets.
+// The aggregate restore above does not touch that file, and it is one-shot, so
+// a separate key repairs project history even after the aggregate key applied.
+const ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY = "zcodePruneWindowProjectRestore_2026_10";
 const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["code", "every-code"],
   ["commandcode", "command-code"],
@@ -1803,6 +1808,8 @@ async function cmdSync(argv, context = {}) {
             cursors,
             queuePath,
             queueStatePath,
+            projectQueuePath,
+            projectQueueStatePath,
             dbPaths: zcodeDbPaths,
           });
           zcodeResult = await multiInstallParse({
@@ -3921,6 +3928,7 @@ module.exports = {
   repairZcodePruneWindowRestore,
   resolveZcodeRebuildFloorMs,
   ZCODE_PRUNE_WINDOW_RESTORE_KEY,
+  ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY,
   reincludeClaudeMemObserverFiles,
   repairGrokQueueFromSessionSnapshots,
   applyCloudConversationsBackfill,
@@ -5397,30 +5405,237 @@ async function listZcodeQueueBackupPaths(queuePath) {
     .sort();
 }
 
+function zcodeProjectTotals(row) {
+  const totals = zcodeRowTotals(row);
+  const billable = Number(row?.billable_total_tokens);
+  const cost = Number(row?.total_cost_usd);
+  if (Number.isFinite(billable)) totals.billable_total_tokens = billable;
+  if (Number.isFinite(cost)) totals.total_cost_usd = cost;
+  return totals;
+}
+
+function zcodeProjectIdentity(row) {
+  const projectKey = typeof row?.project_key === "string" ? row.project_key.trim() : "";
+  const projectRef = typeof row?.project_ref === "string" ? row.project_ref.trim() : "";
+  const hourStart = typeof row?.hour_start === "string" ? row.hour_start : "";
+  if (!projectKey || !projectRef || !hourStart) return null;
+  return {
+    key: `${projectKey}|${hourStart}`,
+    project_key: projectKey,
+    project_ref: projectRef,
+    hour_start: hourStart,
+  };
+}
+
+// Project rows have no model. Key by project + hour and keep project_ref so two
+// projects in the same hour are not collapsed into one restored line.
+async function collectZcodeProjectQueueSeries(filePath, { beforeMs = null, mode = "peak" } = {}) {
+  const series = new Map();
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return series;
+    throw error;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (_error) {
+      continue;
+    }
+    if (row?.source !== "zcode") continue;
+    const identity = zcodeProjectIdentity(row);
+    if (!identity) continue;
+    if (beforeMs != null && !zcodeHourIsPreWindow(identity.hour_start, beforeMs)) continue;
+    const entry = { ...identity, totals: zcodeProjectTotals(row) };
+    const prev = series.get(identity.key);
+    if (mode === "latest" || !prev || zcodeTotalsDominate(entry.totals, prev.totals)) {
+      series.set(identity.key, entry);
+    }
+  }
+  return series;
+}
+
+function rememberZcodeProjectBucket(projectHourly, peak) {
+  const bucketKeyName = `${peak.project_key}|zcode|${peak.hour_start}`;
+  projectHourly.buckets[bucketKeyName] = {
+    ...(projectHourly.buckets[bucketKeyName] || {}),
+    totals: { ...peak.totals },
+    hour_start: peak.hour_start,
+    source: "zcode",
+    project_key: peak.project_key,
+    project_ref: peak.project_ref,
+  };
+}
+
+async function restoreZcodeProjectPruneWindow({
+  cursors,
+  migrations,
+  projectQueuePath,
+  projectQueueStatePath,
+  preserveBeforeMs,
+  rebuildFloorMs,
+}) {
+  const backupPaths = await listZcodeQueueBackupPaths(projectQueuePath);
+  if (backupPaths.length === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY] = {
+      skipped: true,
+      reason: "zcode_project_queue_backup_missing",
+      at: new Date().toISOString(),
+      rebuildFloorMs,
+    };
+    return false;
+  }
+
+  const backupPeaks = new Map();
+  for (const backupPath of backupPaths) {
+    const peaks = await collectZcodeProjectQueueSeries(backupPath, {
+      beforeMs: preserveBeforeMs,
+      mode: "peak",
+    });
+    for (const [key, peak] of peaks) {
+      const prev = backupPeaks.get(key);
+      if (!prev || zcodeTotalsDominate(peak.totals, prev.totals)) {
+        backupPeaks.set(key, peak);
+      }
+    }
+  }
+  if (backupPeaks.size === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY] = {
+      appliedAt: new Date().toISOString(),
+      restored: 0,
+      rebuildFloorMs,
+      preserveBeforeMs,
+      note: "no_pre_window_peaks_in_backups",
+    };
+    return true;
+  }
+
+  const liveLatest = await collectZcodeProjectQueueSeries(projectQueuePath, {
+    beforeMs: preserveBeforeMs,
+    mode: "latest",
+  });
+  const projectHourly = (cursors.projectHourly ||= { buckets: {} });
+  projectHourly.buckets ||= {};
+  const restorations = [];
+  for (const [, peak] of backupPeaks) {
+    const live = liveLatest.get(peak.key)?.totals || null;
+    if (!zcodeTotalsDominate(peak.totals, live)) {
+      const bucketKeyName = `${peak.project_key}|zcode|${peak.hour_start}`;
+      const bucketTotals = projectHourly.buckets[bucketKeyName]?.totals
+        ? zcodeRowTotals(projectHourly.buckets[bucketKeyName].totals)
+        : null;
+      if (bucketTotals && zcodeTotalsDominate(peak.totals, bucketTotals)) {
+        rememberZcodeProjectBucket(projectHourly, peak);
+      }
+      continue;
+    }
+    restorations.push(peak);
+    rememberZcodeProjectBucket(projectHourly, peak);
+  }
+
+  if (restorations.length === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY] = {
+      appliedAt: new Date().toISOString(),
+      restored: 0,
+      rebuildFloorMs,
+      backupsConsidered: backupPaths.length,
+      note: "backup_peaks_not_higher",
+    };
+    return true;
+  }
+
+  await backupExistingFile(projectQueuePath);
+  const append = restorations.map((peak) => JSON.stringify({
+    project_ref: peak.project_ref,
+    project_key: peak.project_key,
+    source: "zcode",
+    hour_start: peak.hour_start,
+    ...peak.totals,
+  }));
+  await fs.appendFile(projectQueuePath, `${append.join("\n")}\n`, "utf8");
+  await resetUploadOffsetForZcodeRepair(
+    projectQueueStatePath,
+    "reset_after_zcode_prune_window_project_restore_2026_10",
+  );
+  migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY] = {
+    appliedAt: new Date().toISOString(),
+    restored: restorations.length,
+    rebuildFloorMs,
+    backupsConsidered: backupPaths.length,
+  };
+  return true;
+}
+
 async function repairZcodePruneWindowRestore({
   cursors,
   queuePath,
   queueStatePath,
+  projectQueuePath = null,
+  projectQueueStatePath = null,
   dbPaths = [],
   rebuildFloorMs: rebuildFloorMsOption = null,
 } = {}) {
   if (!cursors || typeof cursors !== "object") return false;
   const migrations = (cursors.migrations ||= {});
-  const prior = migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY];
-  if (isCompletedZcodeMigration(prior)) return false;
+  const aggregateDone = isCompletedZcodeMigration(migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY]);
+  const projectRequested = typeof projectQueuePath === "string" && projectQueuePath.length > 0;
+  const projectDone = !projectRequested
+    || isCompletedZcodeMigration(migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY]);
+  if (aggregateDone && projectDone) return false;
 
   const rebuildFloorMs = Number.isFinite(rebuildFloorMsOption)
     ? rebuildFloorMsOption
     : resolveZcodeRebuildFloorMs(dbPaths);
   if (!Number.isFinite(rebuildFloorMs)) {
-    migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+    const skip = {
       skipped: true,
       reason: "zcode_rebuild_floor_unavailable",
       at: new Date().toISOString(),
     };
+    if (!aggregateDone) migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = skip;
+    if (projectRequested && !projectDone) {
+      migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY] = { ...skip };
+    }
     return false;
   }
 
+  const preserveBeforeMs = zcodePreserveBeforeMsFromFloor(rebuildFloorMs);
+  let applied = false;
+  if (!aggregateDone) {
+    applied = await restoreZcodeAggregatePruneWindow({
+      cursors,
+      migrations,
+      queuePath,
+      queueStatePath,
+      preserveBeforeMs,
+      rebuildFloorMs,
+    }) || applied;
+  }
+  if (projectRequested && !projectDone) {
+    applied = await restoreZcodeProjectPruneWindow({
+      cursors,
+      migrations,
+      projectQueuePath,
+      projectQueueStatePath,
+      preserveBeforeMs,
+      rebuildFloorMs,
+    }) || applied;
+  }
+  return applied;
+}
+
+async function restoreZcodeAggregatePruneWindow({
+  cursors,
+  migrations,
+  queuePath,
+  queueStatePath,
+  preserveBeforeMs,
+  rebuildFloorMs,
+}) {
   const backupPaths = await listZcodeQueueBackupPaths(queuePath);
   if (backupPaths.length === 0) {
     migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
@@ -5432,7 +5647,6 @@ async function repairZcodePruneWindowRestore({
     return false;
   }
 
-  const preserveBeforeMs = zcodePreserveBeforeMsFromFloor(rebuildFloorMs);
   const backupPeaks = new Map();
   for (const backupPath of backupPaths) {
     const peaks = await collectZcodeQueuePeaks(backupPath, { beforeMs: preserveBeforeMs });

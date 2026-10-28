@@ -151,7 +151,26 @@ const {
   repairZcodePruneWindowRestore,
   resolveZcodeRebuildFloorMs,
   ZCODE_PRUNE_WINDOW_RESTORE_KEY,
+  ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY,
 } = require("../src/commands/sync");
+
+function projectRow(projectKey, projectRef, hour, total) {
+  return JSON.stringify({
+    project_key: projectKey,
+    project_ref: projectRef,
+    hour_start: hour,
+    source: "zcode",
+    input_tokens: total,
+    output_tokens: 0,
+    cached_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: total,
+    billable_total_tokens: total,
+    total_cost_usd: total / 1000,
+    conversation_count: 1,
+  });
+}
 
 test("zcode wipe preserves pre-window queue rows and buckets (#828)", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-zcode-preserve-"));
@@ -466,4 +485,88 @@ test("zcode wipe keeps unattributed pre-window cursor to avoid double-count (#82
 test("resolveZcodeRebuildFloorMs returns null without readable DBs", () => {
   assert.equal(resolveZcodeRebuildFloorMs([]), null);
   assert.equal(resolveZcodeRebuildFloorMs([path.join(os.tmpdir(), "missing-zcode.sqlite")]), null);
+});
+
+test("zcode prune-window restore lifts project rows after the aggregate key already applied", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "tt-zcode-project-restore-"));
+  try {
+    const queuePath = path.join(tmp, "queue.jsonl");
+    const queueStatePath = path.join(tmp, "queue.state.json");
+    const projectQueuePath = path.join(tmp, "project.queue.jsonl");
+    const projectQueueStatePath = path.join(tmp, "project.queue.state.json");
+    const oldHour = "2026-09-01T09:00:00.000Z";
+    const liveHour = "2026-10-10T09:00:00.000Z";
+    const floorMs = Date.parse("2026-09-17T00:00:00.000Z");
+    const appliedAt = "2026-10-19T00:00:00.000Z";
+    await fs.writeFile(queuePath, row("zcode", "GLM-5.2", oldHour, 9000) + "\n");
+    await fs.writeFile(queueStatePath, JSON.stringify({ offset: 10 }));
+    await fs.writeFile(`${projectQueuePath}.bak.2026-10-17T00-00-00-000Z`, [
+      projectRow("alpha", "repo:alpha", oldHour, 9000),
+      projectRow("beta", "repo:beta", oldHour, 4000),
+      projectRow("alpha", "repo:alpha", liveHour, 50),
+      // A model-only line must not be restored as a project row.
+      row("zcode", "GLM-5.2", oldHour, 9000),
+    ].join("\n") + "\n");
+    // The pre-#830 project wipe deleted pre-window rows. In-window usage remains.
+    await fs.writeFile(projectQueuePath, [
+      projectRow("alpha", "repo:alpha", liveHour, 80),
+      projectRow("beta", "repo:beta", oldHour, 4000),
+    ].join("\n") + "\n");
+    await fs.writeFile(projectQueueStatePath, JSON.stringify({ offset: 999 }));
+    const cursors = {
+      hourly: { buckets: {}, groupQueued: {} },
+      projectHourly: {
+        buckets: {
+          [`alpha|zcode|${liveHour}`]: { totals: { total_tokens: 80 } },
+        },
+      },
+      migrations: {
+        [ZCODE_PRUNE_WINDOW_RESTORE_KEY]: { appliedAt, restored: 1 },
+      },
+    };
+
+    assert.equal(await repairZcodePruneWindowRestore({
+      cursors,
+      queuePath,
+      queueStatePath,
+      projectQueuePath,
+      projectQueueStatePath,
+      rebuildFloorMs: floorMs,
+    }), true);
+
+    const rows = (await fs.readFile(projectQueuePath, "utf8")).trim().split("\n").map(JSON.parse);
+    const alphaOld = rows.filter((entry) => entry.project_key === "alpha" && entry.hour_start === oldHour);
+    assert.equal(alphaOld.length, 1);
+    assert.equal(alphaOld[0].project_ref, "repo:alpha");
+    assert.equal(alphaOld[0].total_tokens, 9000);
+    assert.equal(alphaOld[0].total_cost_usd, 9);
+    assert.equal(alphaOld[0].model, undefined);
+    const betaOld = rows.filter((entry) => entry.project_key === "beta" && entry.hour_start === oldHour);
+    assert.equal(betaOld.length, 1, "equal live total is not appended again");
+    assert.equal(betaOld[0].total_tokens, 4000);
+    const alphaLive = rows.filter((entry) => entry.project_key === "alpha" && entry.hour_start === liveHour);
+    assert.equal(alphaLive.length, 1);
+    assert.equal(alphaLive[0].total_tokens, 80, "in-window project usage stays");
+    assert.equal(cursors.projectHourly.buckets[`alpha|zcode|${oldHour}`].totals.total_tokens, 9000);
+    assert.equal(cursors.projectHourly.buckets[`alpha|zcode|${oldHour}`].project_ref, "repo:alpha");
+    assert.equal(cursors.projectHourly.buckets[`beta|zcode|${oldHour}`], undefined);
+    assert.equal(cursors.projectHourly.buckets[`alpha|zcode|${liveHour}`].totals.total_tokens, 80);
+    assert.equal(JSON.parse(await fs.readFile(projectQueueStatePath, "utf8")).offset, 0);
+    assert.equal(cursors.migrations[ZCODE_PRUNE_WINDOW_PROJECT_RESTORE_KEY].restored, 1);
+    assert.equal(cursors.migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY].appliedAt, appliedAt);
+    assert.equal(JSON.parse((await fs.readFile(queuePath, "utf8")).trim()).total_tokens, 9000);
+
+    assert.equal(await repairZcodePruneWindowRestore({
+      cursors,
+      queuePath,
+      queueStatePath,
+      projectQueuePath,
+      projectQueueStatePath,
+      rebuildFloorMs: floorMs,
+    }), false, "project restore is one-shot");
+    const again = (await fs.readFile(projectQueuePath, "utf8")).trim().split("\n");
+    assert.equal(again.length, rows.length);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
 });
